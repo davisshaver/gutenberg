@@ -114,6 +114,7 @@ function gutenberg_register_scripts_and_styles() {
 				'\'fetch\' in window' => 'wp-polyfill-fetch',
 				'document.contains'   => 'wp-polyfill-node-contains',
 				'window.FormData && window.FormData.prototype.keys' => 'wp-polyfill-formdata',
+				'Element.prototype.matches && Element.prototype.closest' => 'wp-polyfill-element-closest',
 			)
 		)
 	);
@@ -247,6 +248,7 @@ function gutenberg_register_scripts_and_styles() {
 		array(
 			'lodash',
 			'wp-compose',
+			'wp-deprecated',
 			'wp-element',
 			'wp-is-shallow-equal',
 			'wp-polyfill',
@@ -265,6 +267,7 @@ function gutenberg_register_scripts_and_styles() {
 				'	var storageKey = "WP_DATA_USER_" + userId;',
 				'	wp.data',
 				'		.use( wp.data.plugins.persistence, { storageKey: storageKey } )',
+				'		.use( wp.data.plugins.asyncGenerator )',
 				'		.use( wp.data.plugins.controls );',
 				'} )()',
 			)
@@ -301,7 +304,7 @@ function gutenberg_register_scripts_and_styles() {
 	wp_register_script(
 		'wp-shortcode',
 		gutenberg_url( 'build/shortcode/index.js' ),
-		array( 'wp-polyfill' ),
+		array( 'wp-polyfill', 'lodash' ),
 		filemtime( gutenberg_dir_path() . 'build/shortcode/index.js' ),
 		true
 	);
@@ -854,21 +857,16 @@ function gutenberg_register_vendor_scripts() {
 		'https://unpkg.com/whatwg-fetch@3.0.0/dist/fetch.umd.js'
 	);
 	gutenberg_register_vendor_script(
-		'wp-polyfill-promise',
-		'https://unpkg.com/promise-polyfill@7.0.0/dist/promise' . $suffix . '.js',
-		array( 'wp-deprecated' )
-	);
-	wp_add_inline_script(
-		'wp-polyfill-promise',
-		'wp.deprecated( "wp-polyfill-promise script handle", { plugin: "Gutenberg", version: "4.0" } );'
-	);
-	gutenberg_register_vendor_script(
 		'wp-polyfill-formdata',
 		'https://unpkg.com/formdata-polyfill@3.0.9/formdata.min.js'
 	);
 	gutenberg_register_vendor_script(
 		'wp-polyfill-node-contains',
 		'https://unpkg.com/polyfill-library@3.26.0-0/polyfills/Node/prototype/contains/polyfill.js'
+	);
+	gutenberg_register_vendor_script(
+		'wp-polyfill-element-closest',
+		'https://unpkg.com/element-closest@2.0.2/element-closest.js'
 	);
 	gutenberg_register_vendor_script(
 		'wp-polyfill-ecmascript',
@@ -1316,41 +1314,32 @@ function gutenberg_editor_scripts_and_styles( $hook ) {
 		'after'
 	);
 
-	// Prepopulate with some test content in demo.
+	// Assign initial edits, if applicable. These are not initially assigned
+	// to the persisted post, but should be included in its save payload.
 	if ( $is_new_post && $is_demo ) {
+		// Prepopulate with some test content in demo.
 		ob_start();
 		include gutenberg_dir_path() . 'post-content.php';
 		$demo_content = ob_get_clean();
 
-		wp_add_inline_script(
-			'wp-edit-post',
-			sprintf(
-				'window._wpGutenbergDefaultPost = { title: %s, content: %s };',
-				wp_json_encode(
-					array(
-						'raw' => __( 'Welcome to the Gutenberg Editor', 'gutenberg' ),
-					)
-				),
-				wp_json_encode(
-					array(
-						'raw' => $demo_content,
-					)
-				)
-			)
+		$initial_edits = array(
+			'title'   => array(
+				'raw' => __( 'Welcome to the Gutenberg Editor', 'gutenberg' ),
+			),
+			'content' => array(
+				'raw' => $demo_content,
+			),
 		);
 	} elseif ( $is_new_post ) {
-		wp_add_inline_script(
-			'wp-edit-post',
-			sprintf(
-				'window._wpGutenbergDefaultPost = { title: %s };',
-				wp_json_encode(
-					array(
-						'raw'      => '',
-						'rendered' => apply_filters( 'the_title', '', $post->ID ),
-					)
-				)
-			)
+		// Override "(Auto Draft)" new post default title with empty string,
+		// or filtered value.
+		$initial_edits = array(
+			'title' => array(
+				'raw' => apply_filters( 'the_title', '', $post->ID ),
+			),
 		);
+	} else {
+		$initial_edits = null;
 	}
 
 	// Prepare Jed locale data.
@@ -1488,10 +1477,9 @@ function gutenberg_editor_scripts_and_styles( $hook ) {
 
 	$init_script = <<<JS
 	( function() {
-		var editorSettings = %s;
 		window._wpLoadGutenbergEditor = new Promise( function( resolve ) {
 			wp.domReady( function() {
-				resolve( wp.editPost.initializeEditor( 'editor', "%s", %d, editorSettings, window._wpGutenbergDefaultPost ) );
+				resolve( wp.editPost.initializeEditor( 'editor', "%s", %d, %s, %s ) );
 			} );
 		} );
 } )();
@@ -1507,7 +1495,13 @@ JS;
 	 */
 	$editor_settings = apply_filters( 'block_editor_settings', $editor_settings, $post );
 
-	$script = sprintf( $init_script, wp_json_encode( $editor_settings ), $post->post_type, $post->ID );
+	$script = sprintf(
+		$init_script,
+		$post->post_type,
+		$post->ID,
+		wp_json_encode( $editor_settings ),
+		wp_json_encode( $initial_edits )
+	);
 	wp_add_inline_script( 'wp-edit-post', $script );
 
 	/**
